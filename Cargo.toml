@@ -1,0 +1,16 @@
+[package]
+name = "rmds"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+description = "Remove unwanted macOS metadata from ZIP archives"
+license = "MIT"
+keywords = ["cli", "zip", "macos", "metadata"]
+categories = ["command-line-utilities", "filesystem"]
+
+[dependencies]
+tempfile = "3.27.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[lints.rust]
+unsafe_code = "forbid"
