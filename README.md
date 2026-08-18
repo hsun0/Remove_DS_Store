@@ -16,16 +16,132 @@ macOS 在建立或封裝檔案時可能加入：
 
 這些檔案對一般 ZIP 內容通常沒有用途，在 Windows、Linux 或公開發佈的 archive 中尤其容易造成干擾。`rmds` 只移除精確符合規則的 path component；`.gitignore`、`.env`、`.hidden`、`foo._bar` 與 `__MACOSX-file.txt` 都會保留。
 
-## 安裝
+## 從 repository 安裝
 
-正式 release 可直接下載平台對應的單一 executable：
+目前先以 clone repository 後從原始碼安裝為主。需要先安裝 [rustup](https://rustup.rs/)；repository 已用 `rust-toolchain.toml` 固定 Rust **1.97.1**，rustup 會取得相同的 compiler、rustfmt 與 Clippy。
 
-```text
-macOS / Linux: rmds
-Windows:       rmds.exe
+```bash
+git clone <repository-url>
+cd Remove_DS_Store
+rustup show
+cargo test --locked
+cargo install --path . --locked
 ```
 
-第一階段 repository 尚未加入 release automation。現在可依下方「從原始碼建置」產生 executable；執行完成的程式不需要 Python、Node.js、Java、Rust、Cargo、Homebrew、libzip 或系統 zlib。
+`cargo install` 會建立最佳化版本，並將 `rmds` 安裝到 Cargo 的 executable 目錄：
+
+```text
+macOS / Linux: $HOME/.cargo/bin/rmds
+Windows:       %USERPROFILE%\.cargo\bin\rmds.exe
+```
+
+如果使用者有設定自訂的 `CARGO_HOME`，實際位置會是 `$CARGO_HOME/bin`。安裝完成後先嘗試：
+
+```bash
+rmds --help
+```
+
+若 shell 顯示找不到 `rmds`，依下方環境設定 PATH。
+
+### macOS：zsh
+
+目前的 terminal session：
+
+```zsh
+export PATH="$HOME/.cargo/bin:$PATH"
+rehash
+rmds --help
+```
+
+若要永久生效，將這一行加入 `~/.zshrc`：
+
+```zsh
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+重新開啟 terminal，或立即載入：
+
+```zsh
+source "$HOME/.zshrc"
+```
+
+### Linux：bash
+
+目前的 shell session：
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+hash -r
+rmds --help
+```
+
+若要永久生效，將這一行加入 `~/.bashrc`：
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+立即載入：
+
+```bash
+source "$HOME/.bashrc"
+```
+
+部分 Linux login shell 使用 `~/.profile` 或 `~/.bash_profile`；若重新登入後設定消失，請將相同 PATH 設定加入該 login profile。
+
+### macOS／Linux：fish
+
+`fish_add_path` 會將設定保存在 fish 的 universal variables：
+
+```fish
+fish_add_path $HOME/.cargo/bin
+rmds --help
+```
+
+### Windows：PowerShell
+
+只套用到目前的 PowerShell session：
+
+```powershell
+$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
+Get-Command rmds
+rmds.exe --help
+```
+
+若要永久生效，開啟 Windows「環境變數」，在使用者的 `Path` 新增：
+
+```text
+C:\Users\<使用者名稱>\.cargo\bin
+```
+
+儲存後關閉並重新開啟 PowerShell 或 Windows Terminal。
+
+### Windows：Command Prompt
+
+只套用到目前的 CMD session：
+
+```bat
+set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
+where rmds
+rmds.exe --help
+```
+
+永久設定同樣使用 Windows「環境變數」介面，將 `%USERPROFILE%\.cargo\bin` 加入使用者的 `Path`。
+
+### 不安裝到 PATH，直接執行
+
+也可以只建立 repository 內的 executable：
+
+```bash
+cargo build --release --locked
+```
+
+接著執行：
+
+```text
+./target/release/rmds          # macOS / Linux
+.\target\release\rmds.exe     # Windows PowerShell
+```
 
 ## 使用方式
 
@@ -60,24 +176,6 @@ rmds zip --help
 - 一般保留項目使用 raw copy，維持 filename bytes、compression method、compressed data、timestamp、Unix permissions、executable bit、directory、extra fields 與 entry comment。Symlink 以專用 writer 保留連結語意與 target；無法安全表示的非 UTF-8 symlink 會失敗。
 
 目前支援完整驗證 Stored 與 Deflate entry。遇到 encrypted entry 或未啟用的 compression method 會保守失敗，不產生 final output。ZIP round-trip 的已知 metadata 邊界請見 [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md)。
-
-## 從原始碼建置
-
-需要先安裝 [rustup](https://rustup.rs/)。Repository 已用 `rust-toolchain.toml` 固定 Rust **1.97.1**；rustup 會依檔案取得相同的 compiler、rustfmt 與 Clippy。
-
-```bash
-git clone <repository-url>
-cd rmds
-rustup show
-cargo build --release --locked
-```
-
-Executable 位於：
-
-```text
-target/release/rmds      # macOS / Linux
-target/release/rmds.exe  # Windows
-```
 
 ## 開發與測試
 
