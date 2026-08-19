@@ -207,8 +207,16 @@ rmds zip photos.zip -o clean.zip
 
 ```bash
 rmds --help
+rmds --version
 rmds folder --help
 rmds zip --help
+```
+
+查詢目前安裝的版本：
+
+```text
+$ rmds --version
+rmds 0.1.1
 ```
 
 ## 安全保證

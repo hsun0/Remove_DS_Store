@@ -106,6 +106,28 @@ fn main_help_lists_zip_and_folder() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("zip"));
     assert!(stdout.contains("folder"));
+    assert!(stdout.contains("--version"));
+}
+
+#[test]
+fn version_matches_the_cargo_package_version() {
+    let temp = tempdir().unwrap();
+    let output = run(&["--version"], temp.path());
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("rmds {}\n", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn version_rejects_extra_arguments() {
+    let temp = tempdir().unwrap();
+    let output = run(&["--version", "extra"], temp.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unexpected argument after --version")
+    );
 }
 
 #[test]

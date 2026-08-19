@@ -16,10 +16,15 @@ Usage:
   rmds folder [PATH]
   rmds folder --apply <PATH>
   rmds --help
+  rmds --version
 
 Commands:
   zip       Create a cleaned copy of a ZIP archive
   folder    Preview folder metadata, or explicitly apply in-place deletion
+
+Options:
+  -h, --help  Print help
+  --version   Print version
 ";
 
 const ZIP_HELP: &str = "Clean macOS metadata from a ZIP archive without modifying the original.
@@ -58,6 +63,7 @@ enum FolderMode {
 
 enum CliAction {
     Help(&'static str),
+    Version,
     Zip { input: PathBuf, output: PathBuf },
     Folder { mode: FolderMode, path: PathBuf },
 }
@@ -66,6 +72,10 @@ fn main() -> ExitCode {
     match parse_args(env::args_os().skip(1)) {
         Ok(CliAction::Help(help)) => {
             print!("{help}");
+            ExitCode::SUCCESS
+        }
+        Ok(CliAction::Version) => {
+            println!("rmds {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         Ok(CliAction::Zip { input, output }) => run_zip(input, output),
@@ -251,6 +261,12 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, Str
         }
         return Ok(CliAction::Help(HELP));
     }
+    if is(&command, "--version") {
+        if args.next().is_some() {
+            return Err("unexpected argument after --version".to_owned());
+        }
+        return Ok(CliAction::Version);
+    }
 
     if is(&command, "zip") {
         parse_zip_args(args)
@@ -409,6 +425,15 @@ mod tests {
         assert!(parse_args(args(&["folder", "--apply"])).is_err());
         assert!(parse_args(args(&["folder", "photos", "--apply"])).is_err());
         assert!(parse_args(args(&["folder", "--apply", "photos", "extra"])).is_err());
+    }
+
+    #[test]
+    fn parses_version_without_extra_arguments() {
+        assert!(matches!(
+            parse_args(args(&["--version"])),
+            Ok(CliAction::Version)
+        ));
+        assert!(parse_args(args(&["--version", "extra"])).is_err());
     }
 
     #[test]
