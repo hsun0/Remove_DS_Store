@@ -1,6 +1,6 @@
 # 技術與依賴選型
 
-本文件記錄第一階段的選擇；更新 dependency 或 Rust toolchain 時應一併 review。
+本文件記錄 0.1.1 的選擇；更新 dependency 或 Rust toolchain 時應一併 review。
 
 ## Rust toolchain
 
@@ -34,7 +34,7 @@
 
 ## CLI parsing
 
-目前語法只有 `rmds zip INPUT [-o OUTPUT]`。`std::env::args_os` 足以保留非 UTF-8 host path、提供可預測 validation，且不需加入 `clap` 的 derive 與 transitive dependencies。若未來 subcommand 與 option 顯著增加，再重新評估 `clap`。
+目前語法包含 `rmds zip INPUT [-o OUTPUT]`、`rmds folder [PATH]` 與 `rmds folder --apply PATH`。`std::env::args_os` 足以保留非 UTF-8 host path、提供可預測 validation，且不需加入 `clap` 的 derive 與 transitive dependencies。Folder traversal、symlink 判斷及 interactive-terminal 檢查也都由 standard library 提供，因此 0.1.1 沒有新增 dependency。若未來 subcommand 與 option 顯著增加，再重新評估 `clap`。
 
 ## Atomic output
 
