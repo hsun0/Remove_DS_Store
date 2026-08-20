@@ -18,15 +18,48 @@ macOS 在建立或封裝檔案時可能加入：
 
 ## 從 repository 安裝
 
-目前先以 clone repository 後從原始碼安裝為主。需要先安裝 [rustup](https://rustup.rs/)；repository 已用 `rust-toolchain.toml` 固定 Rust **1.97.1**，rustup 會取得相同的 compiler、rustfmt 與 Clippy。
+目前不提供預先編譯的下載檔或套件管理器安裝，主要使用方式是 clone repository 後在自己的電腦編譯安裝。
+
+### 先備需求
+
+安裝前需要：
+
+- **Git**：用來 clone repository；使用 `rmds repo` 時也必須能從 `PATH` 執行 `git`。
+- **rustup**：建議透過 [Rust 官方安裝頁面](https://rustup.rs/)安裝。rustup 會一併提供 `rustc` 與 Cargo，不需要另外安裝這兩個工具。
+- **網路連線**：第一次建置時，rustup 需要下載指定的 Rust toolchain，Cargo 也需要下載 `Cargo.lock` 鎖定的 dependencies。
+- **Windows MSVC 建置工具**：Windows 使用預設 MSVC Rust toolchain 時，需要 linker、Windows SDK 與相關 libraries。`rustup-init` 通常會提示自動安裝；也可以依照 [rustup 的 MSVC prerequisites](https://rust-lang.github.io/rustup/installation/windows-msvc.html)安裝 Visual Studio 的「Desktop development with C++」。
+
+支援目標為 macOS、Windows 與 Linux。repository 透過 `rust-toolchain.toml` 固定 Rust **1.97.1**，並要求 `rustfmt` 與 Clippy；進入 repository 後，rustup 會自動選擇並在需要時安裝相同版本。
+
+先確認基本工具可以執行：
 
 ```bash
-git clone <repository-url>
+git --version
+rustup --version
+cargo --version
+rustc --version
+```
+
+如果 `rustup`、`cargo` 或 `rustc` 顯示找不到指令，請關閉並重新開啟 terminal，讓 rustup 的 PATH 設定生效，再重新檢查。
+
+### Clone、驗證與安裝
+
+```bash
+git clone https://github.com/hsun0/Remove_DS_Store.git
 cd Remove_DS_Store
 rustup show
 cargo test --locked
 cargo install --path . --locked
 ```
+
+各指令的用途：
+
+- `git clone`：下載完整 repository。
+- `rustup show`：顯示目前選用的 toolchain，並確認專案固定的 Rust 版本可用。
+- `cargo test --locked`：使用 `Cargo.lock` 鎖定的 dependencies 執行測試；建議在安裝前先確認測試通過。
+- `cargo install --path . --locked`：從目前原始碼建立最佳化的 executable，然後安裝到 Cargo 的 executable 目錄。
+
+如果 `cargo install` 顯示專案的 `rust-toolchain.toml` 覆蓋預設 toolchain，這是正常提醒：代表本次建置使用專案固定的 Rust 1.97.1，而不是電腦的其他預設版本。
 
 `cargo install` 會建立最佳化版本，並將 `rmds` 安裝到 Cargo 的 executable 目錄：
 
@@ -35,9 +68,10 @@ macOS / Linux: $HOME/.cargo/bin/rmds
 Windows:       %USERPROFILE%\.cargo\bin\rmds.exe
 ```
 
-如果使用者有設定自訂的 `CARGO_HOME`，實際位置會是 `$CARGO_HOME/bin`。安裝完成後先嘗試：
+如果使用者有設定自訂的 `CARGO_HOME`，實際位置會是 `$CARGO_HOME/bin`。安裝完成後確認版本與 help：
 
 ```bash
+rmds --version
 rmds --help
 ```
 
@@ -145,23 +179,6 @@ cargo build --release --locked
 
 ## 使用方式
 
-### 彩色輸出
-
-在互動式 terminal 中，`rmds` 會以紅色標示錯誤與重要警告、綠色標示成功結果，並醒目顯示路徑、建議指令及確認文字 `DELETE`。當 stdout 或 stderr 被 pipe／redirect 時，對應輸出會自動維持純文字，不會包含 ANSI color codes。
-
-若不希望顯示顏色，可設定標準的 `NO_COLOR` 環境變數；只要變數存在，不論內容為何都會停用顏色：
-
-```bash
-NO_COLOR=1 rmds folder
-```
-
-PowerShell 可使用：
-
-```powershell
-$env:NO_COLOR = "1"
-rmds folder
-```
-
 ### 唯讀 Check 模式
 
 Folder、Git repository 與 ZIP 共用相同的 check 語意：完整掃描、列出候選並以 exit code 回報，過程不詢問 `DELETE`，也不刪除、建立或覆寫檔案。
@@ -181,34 +198,9 @@ Check mode 的 exit code：
 - `1`：檢查完成，找到至少一個 metadata；適合讓 CI job 判定內容不符合要求。
 - `2`：參數或目標錯誤，或掃描／驗證無法完整完成。
 
-Folder check 重用安全的 filesystem traversal；repo check 會顯示 Git classification，但不要求 TTY、不修改 `.git`、index 或 `.gitignore`；ZIP check 會串流驗證 entry、CRC、compression 與安全路徑，不 extract、不建立 cleaned ZIP 或暫存檔。pipe、redirect 及 `NO_COLOR` 下的結果保持純文字。
+### 資料夾清理
 
-GitHub Actions 可使用：
-
-```yaml
-- name: Check macOS metadata in repository
-  run: rmds repo --check .
-```
-
-這只是 workflow 範例；`rmds` 不會自動建立或修改 repository 的 workflow。
-
-### 預覽資料夾
-
-folder command 會遞迴掃描；預設是安全的 preview，不會修改 filesystem：
-
-```bash
-# 預覽目前資料夾，等同 rmds folder .
-rmds folder
-
-# 預覽指定資料夾
-rmds folder ./project
-```
-
-輸出會顯示解析後的 absolute target、依相對路徑穩定排序的候選項目，以及 apply 指令。Preview 不會刪除或修改檔案，也不會建立 token、cache、lock、設定或其他狀態檔。
-
-### 套用資料夾清理
-
-真正刪除必須使用唯一的明確形式：
+刪除必須使用唯一的明確形式：
 
 ```bash
 rmds folder --apply ./project
@@ -227,14 +219,6 @@ echo DELETE | rmds folder --apply ./project
 ```
 
 找不到 metadata 時會正常結束，不詢問確認。folder cleanup 不提供 rollback；若刪除途中因權限、I/O 或 filesystem race 失敗，`rmds` 會立即停止、回傳失敗狀態並列出已成功刪除的項目。
-
-### Folder metadata 規則
-
-- `.DS_Store`：只刪除名稱完全相同的 regular file 或 symbolic link。真正的同名 directory 會保留，但仍掃描其內容。
-- `._*`：只刪除 filename 以 `._` 開頭的 regular file 或 symbolic link。符合名稱的真正 directory 會保留，但仍掃描其內容。
-- `__MACOSX`：只有名稱完全相同的真正 directory 會整棵視為一個候選項目；同名 regular file 會保留。
-- metadata symbolic link 只移除 link，不會觸碰 target；其他 directory symlink 不會被進入或修改，broken symlink 也不會被 follow。
-- Preview 與 Apply 都拒絕 symbolic-link root 與 filesystem root（例如 `/` 或 `C:\`）。
 
 ### 清理 Git repository
 
@@ -258,52 +242,23 @@ rmds repo ./project
 - `[ignored]`：符合 Git ignore 規則。
 - `[mixed]`：`__MACOSX` tree 內含多種 Git 狀態。
 
-Git 只能協助 review working-tree deletion，不能保證復原 untracked、ignored 或 uncommitted content。成功後請檢查：
-
-```bash
-git status --short
-```
-
-repo mode 有以下硬性界線：
-
-- filesystem traversal 永遠跳過 `.git`；不刪除或寫入 Git directory、common directory、index、commit、branch、tag、config 或 history。
-- 不執行 `git add`、`git rm`、`git clean`、commit 或 push；tracked deletion 不會自動 stage。
-- 不進入 nested repository 或 submodule。任何子資料夾出現 `.git` directory、file 或 symlink，就保守跳過整棵 tree。
-- 不修改 `.gitignore`、`.git/info/exclude` 或 global ignore，只顯示建議：`.DS_Store`、`._*`、`__MACOSX/`。
-- repo deletion 是 in-place 且沒有 automatic rollback；partial failure 會停止並列出已刪除項目。
-
 ### 清理 ZIP
 
 ```bash
-rmds zip photos.zip
+rmds zip <input.zip> [-o <output.zip>]
 ```
 
-預設建立 `photos-clean.zip`，來源 `photos.zip` 保持不變。
-
-### 自訂輸出
-
-```bash
-rmds zip photos.zip -o clean.zip
-```
-
-說明：
-
-```bash
-rmds --help
-rmds --version
-rmds folder --check .
-rmds folder --help
-rmds repo --check .
-rmds repo --help
-rmds zip --check archive.zip
-rmds zip --help
-```
+### 其他指令
 
 查詢目前安裝的版本：
 
 ```text
 $ rmds --version
-rmds 0.1.3
+```
+
+指令用法說明：
+```text
+$ rmds --help
 ```
 
 ## 安全保證
@@ -354,14 +309,6 @@ cargo clippy --all-targets --locked -- -D warnings
 ```
 
 `Cargo.toml`、`Cargo.lock` 與 `rust-toolchain.toml` 都必須提交。Dependency 與 compiler 升級是明確的 repository change：review lockfile diff、執行完整檢查，再由 macOS／Windows／Linux CI 驗證。
-
-## 跨平台目標
-
-GitHub Actions 在 `ubuntu-latest`、`macos-latest`、`windows-latest` 執行相同 locked build、test、format 與 Clippy。程式不呼叫 Finder、Apple-only API、shell、`/usr/bin/zip` 或 `/usr/bin/ditto`。只有 repo mode 會透過 `std::process::Command` 呼叫使用者 `PATH` 中的 Git executable；zip 與 folder mode 不依賴 Git。
-
-## 尚未實作
-
-0.1.3 沒有 repo `--apply`、`--yes`、`--force`、`--no-confirm`、trash／recycle-bin、rollback、`.gitignore` 修改、Git stage／commit／push／history rewriting、submodule cleaning、nested repository cleaning、GUI、設定檔、telemetry、套件管理器發佈、release automation 或自動更新。
 
 ## License
 
