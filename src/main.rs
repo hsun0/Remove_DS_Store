@@ -89,6 +89,63 @@ enum CliAction {
     Repo { path: PathBuf },
 }
 
+#[derive(Clone, Copy)]
+enum Color {
+    Red,
+    Green,
+    BoldCyan,
+}
+
+impl Color {
+    const fn ansi(self) -> &'static str {
+        match self {
+            Self::Red => "\x1b[31m",
+            Self::Green => "\x1b[32m",
+            Self::BoldCyan => "\x1b[1;36m",
+        }
+    }
+}
+
+fn no_color_is_set() -> bool {
+    env::var_os("NO_COLOR").is_some()
+}
+
+fn colors_enabled(is_terminal: bool, no_color_is_set: bool) -> bool {
+    is_terminal && !no_color_is_set
+}
+
+fn stdout_colors() -> bool {
+    colors_enabled(io::stdout().is_terminal(), no_color_is_set())
+}
+
+fn stderr_colors() -> bool {
+    colors_enabled(io::stderr().is_terminal(), no_color_is_set())
+}
+
+fn styled(text: &str, color: Color, enabled: bool) -> String {
+    if enabled {
+        format!("{}{text}\x1b[0m", color.ansi())
+    } else {
+        text.to_owned()
+    }
+}
+
+fn stdout_styled(text: &str, color: Color) -> String {
+    styled(text, color, stdout_colors())
+}
+
+fn stderr_styled(text: &str, color: Color) -> String {
+    styled(text, color, stderr_colors())
+}
+
+fn stdout_path(path: &Path) -> String {
+    stdout_styled(&path.display().to_string(), Color::BoldCyan)
+}
+
+fn error_label() -> String {
+    stderr_styled("Error", Color::Red)
+}
+
 fn main() -> ExitCode {
     match parse_args(env::args_os().skip(1)) {
         Ok(CliAction::Help(help)) => {
@@ -103,7 +160,11 @@ fn main() -> ExitCode {
         Ok(CliAction::Folder { mode, path }) => run_folder(mode, &path),
         Ok(CliAction::Repo { path }) => run_repo(&path),
         Err(message) => {
-            eprintln!("Error: {message}\n\nRun 'rmds --help' for usage.");
+            eprintln!(
+                "{}: {message}\n\nRun {} for usage.",
+                error_label(),
+                stderr_styled("'rmds --help'", Color::BoldCyan)
+            );
             ExitCode::from(2)
         }
     }
@@ -113,14 +174,17 @@ fn run_repo(path: &Path) -> ExitCode {
     let scan = match scan_repo(path) {
         Ok(scan) => scan,
         Err(error) => {
-            eprintln!("Error: {error}\n\nNo files were removed.");
+            eprintln!("{}: {error}\n\nNo files were removed.", error_label());
             return ExitCode::FAILURE;
         }
     };
 
-    println!("Repository:\n  {}\n", scan.root().display());
+    println!("Repository:\n  {}\n", stdout_path(scan.root()));
     if scan.is_empty() {
-        println!("No macOS metadata found.\n\nNo files were removed.\n");
+        println!(
+            "{}\n\nNo files were removed.\n",
+            stdout_styled("No macOS metadata found.", Color::Green)
+        );
         print_gitignore_suggestion();
         return ExitCode::SUCCESS;
     }
@@ -131,30 +195,45 @@ fn run_repo(path: &Path) -> ExitCode {
         scan.candidates().len(),
         entry_word(scan.candidates().len())
     );
-    println!("\nWARNING: This is an in-place operation.");
-    println!("Tracked deletions will appear in the Git working tree.");
-    println!("Untracked and ignored files may not be recoverable through Git.");
-    println!("Uncommitted file contents may not be recoverable.");
-    println!("rmds will not modify the Git index, commits, history, or .git.");
-    println!("This operation cannot provide automatic rollback.\n");
+    for warning in [
+        "WARNING: This is an in-place operation.",
+        "Tracked deletions will appear in the Git working tree.",
+        "Untracked and ignored files may not be recoverable through Git.",
+        "Uncommitted file contents may not be recoverable.",
+        "rmds will not modify the Git index, commits, history, or .git.",
+        "This operation cannot provide automatic rollback.",
+    ] {
+        println!("{}", stdout_styled(warning, Color::Red));
+    }
+    println!();
 
     let stdin = io::stdin();
     if !stdin.is_terminal() {
         eprintln!(
-            "Error: repository deletion requires an interactive terminal.\n\nNo files were removed."
+            "{}: repository deletion requires an interactive terminal.\n\nNo files were removed.",
+            error_label()
         );
         return ExitCode::FAILURE;
     }
 
-    print!("Type DELETE exactly to continue: ");
+    print!(
+        "Type {} exactly to continue: ",
+        stdout_styled("DELETE", Color::BoldCyan)
+    );
     if let Err(error) = io::stdout().flush() {
-        eprintln!("\nError: cannot display confirmation prompt: {error}\n\nNo files were removed.");
+        eprintln!(
+            "\n{}: cannot display confirmation prompt: {error}\n\nNo files were removed.",
+            error_label()
+        );
         return ExitCode::FAILURE;
     }
 
     let mut confirmation = String::new();
     if let Err(error) = stdin.read_line(&mut confirmation) {
-        eprintln!("\nError: cannot read confirmation: {error}\n\nNo files were removed.");
+        eprintln!(
+            "\n{}: cannot read confirmation: {error}\n\nNo files were removed.",
+            error_label()
+        );
         return ExitCode::FAILURE;
     }
     if !is_delete_confirmation(&confirmation) {
@@ -165,29 +244,39 @@ fn run_repo(path: &Path) -> ExitCode {
 
     match apply_repo_cleanup(&scan) {
         Ok(report) => {
-            println!("\nRemoved:");
+            println!("\n{}", stdout_styled("Removed:", Color::Green));
             print_repo_candidate_path_lines(scan.candidates());
             println!(
-                "\nRemoved {} metadata {}.",
-                report.removed.len(),
-                entry_word(report.removed.len())
+                "\n{}",
+                stdout_styled(
+                    &format!(
+                        "Removed {} metadata {}.",
+                        report.removed.len(),
+                        entry_word(report.removed.len())
+                    ),
+                    Color::Green
+                )
             );
             println!("\nGit metadata, index, and history were not modified.");
+            let review_command = format!("git -C {} status --short", scan.root().display());
             println!(
-                "Review the working tree with:\n  git -C {} status --short\n",
-                scan.root().display()
+                "Review the working tree with:\n  {}\n",
+                stdout_styled(&review_command, Color::BoldCyan)
             );
             print_gitignore_suggestion();
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("\nError: {error}");
+            eprintln!("\n{}: {error}", error_label());
             if error.removed().is_empty() {
                 eprintln!("\nNo files were removed.");
             } else {
                 eprintln!("\nAlready removed before the failure:");
                 for path in error.removed() {
-                    eprintln!("  {}", path.display());
+                    eprintln!(
+                        "  {}",
+                        stderr_styled(&path.display().to_string(), Color::BoldCyan)
+                    );
                 }
                 eprintln!(
                     "\nAlready removed {} metadata {} before the failure.",
@@ -212,7 +301,7 @@ fn print_repo_candidates(heading: &str, candidates: &[RepoCandidate]) {
         println!(
             "  [{:<17}] {}{suffix}",
             candidate.git_status().label(),
-            candidate.relative_path().display()
+            stdout_path(candidate.relative_path())
         );
     }
 }
@@ -220,46 +309,62 @@ fn print_repo_candidates(heading: &str, candidates: &[RepoCandidate]) {
 fn print_repo_candidate_path_lines(candidates: &[RepoCandidate]) {
     for candidate in candidates {
         if candidate.display_as_directory() {
-            println!("  {}/", candidate.relative_path().display());
+            println!("  {}/", stdout_path(candidate.relative_path()));
         } else {
-            println!("  {}", candidate.relative_path().display());
+            println!("  {}", stdout_path(candidate.relative_path()));
         }
     }
 }
 
 fn print_gitignore_suggestion() {
     println!(
-        "Suggested .gitignore entries:\n  .DS_Store\n  ._*\n  __MACOSX/\n\nrmds did not modify .gitignore."
+        "Suggested .gitignore entries:\n  {}\n  {}\n  {}\n\nrmds did not modify .gitignore.",
+        stdout_styled(".DS_Store", Color::BoldCyan),
+        stdout_styled("._*", Color::BoldCyan),
+        stdout_styled("__MACOSX/", Color::BoldCyan)
     );
 }
 
 fn run_zip(input: PathBuf, output: PathBuf) -> ExitCode {
-    println!("Cleaning {}...\n", input.display());
+    println!("Cleaning {}...\n", stdout_path(&input));
 
     match clean_zip(&input, &output) {
         Ok(report) => {
             if report.removed_entries.is_empty() {
-                println!("No macOS metadata found.\n");
+                println!(
+                    "{}\n",
+                    stdout_styled("No macOS metadata found.", Color::Green)
+                );
             } else {
-                println!("Removed:");
+                println!("{}", stdout_styled("Removed:", Color::Green));
                 for entry in &report.removed_entries {
-                    println!("  {entry}");
+                    println!("  {}", stdout_styled(entry, Color::BoldCyan));
                 }
                 println!();
             }
 
-            println!("Created:\n  {}\n", report.output.display());
+            println!(
+                "{}\n  {}\n",
+                stdout_styled("Created:", Color::Green),
+                stdout_path(&report.output)
+            );
             if !report.removed_entries.is_empty() {
                 println!(
-                    "Removed {} metadata {}.",
-                    report.removed_entries.len(),
-                    entry_word(report.removed_entries.len())
+                    "{}",
+                    stdout_styled(
+                        &format!(
+                            "Removed {} metadata {}.",
+                            report.removed_entries.len(),
+                            entry_word(report.removed_entries.len())
+                        ),
+                        Color::Green
+                    )
                 );
             }
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("Error: {error}");
+            eprintln!("{}: {error}", error_label());
             ExitCode::FAILURE
         }
     }
@@ -269,14 +374,17 @@ fn run_folder(mode: FolderMode, path: &Path) -> ExitCode {
     let scan = match scan_folder(path) {
         Ok(scan) => scan,
         Err(error) => {
-            eprintln!("Error: {error}\n\nNo files were removed.");
+            eprintln!("{}: {error}\n\nNo files were removed.", error_label());
             return ExitCode::FAILURE;
         }
     };
 
-    println!("Scanning folder:\n  {}\n", scan.root().display());
+    println!("Scanning folder:\n  {}\n", stdout_path(scan.root()));
     if scan.is_empty() {
-        println!("No macOS metadata found.\n\nNo files were removed.");
+        println!(
+            "{}\n\nNo files were removed.",
+            stdout_styled("No macOS metadata found.", Color::Green)
+        );
         return ExitCode::SUCCESS;
     }
 
@@ -288,11 +396,12 @@ fn run_folder(mode: FolderMode, path: &Path) -> ExitCode {
 
 fn run_folder_preview(scan: &FolderScan, original_path: &Path) -> ExitCode {
     print_candidate_paths("Found macOS metadata:", scan.candidates());
+    let command = format!("rmds folder --apply {}", original_path.display());
     println!(
-        "\nNo files were removed.\n\nTo remove {} metadata {}, run:\n  rmds folder --apply {}",
+        "\nNo files were removed.\n\nTo remove {} metadata {}, run:\n  {}",
         scan.candidates().len(),
         entry_word(scan.candidates().len()),
-        original_path.display()
+        stdout_styled(&command, Color::BoldCyan)
     );
     ExitCode::SUCCESS
 }
@@ -307,28 +416,43 @@ fn run_folder_apply(scan: &FolderScan) -> ExitCode {
         scan.candidates().len(),
         entry_word(scan.candidates().len())
     );
-    println!("\nWARNING: This is an in-place operation.");
-    println!("The listed files and directories will be deleted from the target folder.");
-    println!("This operation cannot be undone.");
-    println!("A failure partway through will not roll back items already removed.\n");
+    for warning in [
+        "WARNING: This is an in-place operation.",
+        "The listed files and directories will be deleted from the target folder.",
+        "This operation cannot be undone.",
+        "A failure partway through will not roll back items already removed.",
+    ] {
+        println!("{}", stdout_styled(warning, Color::Red));
+    }
+    println!();
 
     let stdin = io::stdin();
     if !stdin.is_terminal() {
         eprintln!(
-            "Error: apply mode requires an interactive terminal. Piped or redirected input is refused.\n\nNo files were removed."
+            "{}: apply mode requires an interactive terminal. Piped or redirected input is refused.\n\nNo files were removed.",
+            error_label()
         );
         return ExitCode::FAILURE;
     }
 
-    print!("Type DELETE exactly to continue: ");
+    print!(
+        "Type {} exactly to continue: ",
+        stdout_styled("DELETE", Color::BoldCyan)
+    );
     if let Err(error) = io::stdout().flush() {
-        eprintln!("\nError: cannot display confirmation prompt: {error}\n\nNo files were removed.");
+        eprintln!(
+            "\n{}: cannot display confirmation prompt: {error}\n\nNo files were removed.",
+            error_label()
+        );
         return ExitCode::FAILURE;
     }
 
     let mut confirmation = String::new();
     if let Err(error) = stdin.read_line(&mut confirmation) {
-        eprintln!("\nError: cannot read confirmation: {error}\n\nNo files were removed.");
+        eprintln!(
+            "\n{}: cannot read confirmation: {error}\n\nNo files were removed.",
+            error_label()
+        );
         return ExitCode::FAILURE;
     }
     if !is_delete_confirmation(&confirmation) {
@@ -338,23 +462,32 @@ fn run_folder_apply(scan: &FolderScan) -> ExitCode {
 
     match apply_folder_cleanup(scan) {
         Ok(report) => {
-            println!("\nRemoved:");
+            println!("\n{}", stdout_styled("Removed:", Color::Green));
             print_candidate_path_lines(scan.candidates());
             println!(
-                "\nRemoved {} metadata {}.",
-                report.removed.len(),
-                entry_word(report.removed.len())
+                "\n{}",
+                stdout_styled(
+                    &format!(
+                        "Removed {} metadata {}.",
+                        report.removed.len(),
+                        entry_word(report.removed.len())
+                    ),
+                    Color::Green
+                )
             );
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("\nError: {error}");
+            eprintln!("\n{}: {error}", error_label());
             if error.removed().is_empty() {
                 eprintln!("\nNo files were removed.");
             } else {
                 eprintln!("\nAlready removed before the failure:");
                 for path in error.removed() {
-                    eprintln!("  {}", path.display());
+                    eprintln!(
+                        "  {}",
+                        stderr_styled(&path.display().to_string(), Color::BoldCyan)
+                    );
                 }
                 eprintln!(
                     "\nAlready removed {} metadata {} before the failure.",
@@ -376,9 +509,9 @@ fn print_candidate_paths(heading: &str, candidates: &[FolderCandidate]) {
 fn print_candidate_path_lines(candidates: &[FolderCandidate]) {
     for candidate in candidates {
         if candidate.display_as_directory() {
-            println!("  {}/", candidate.relative_path().display());
+            println!("  {}/", stdout_path(candidate.relative_path()));
         } else {
-            println!("  {}", candidate.relative_path().display());
+            println!("  {}", stdout_path(candidate.relative_path()));
         }
     }
 }
@@ -553,7 +686,9 @@ fn is(value: &OsStr, expected: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{CliAction, FolderMode, is_delete_confirmation, parse_args};
+    use super::{
+        CliAction, Color, FolderMode, colors_enabled, is_delete_confirmation, parse_args, styled,
+    };
     use std::ffi::OsString;
     use std::path::Path;
 
@@ -657,5 +792,18 @@ mod tests {
         assert!(parse_args(args(&["zip", "a.zip", "--output"])).is_err());
         assert!(parse_args(args(&["zip", "a.zip", "extra"])).is_err());
         assert!(parse_args(args(&["folder", "--force", "photos"])).is_err());
+    }
+
+    #[test]
+    fn color_requires_a_terminal_and_respects_no_color() {
+        assert!(colors_enabled(true, false));
+        assert!(!colors_enabled(false, false));
+        assert!(!colors_enabled(true, true));
+
+        assert_eq!(styled("warning", Color::Red, false), "warning");
+        assert_eq!(
+            styled("warning", Color::Red, true),
+            "\x1b[31mwarning\x1b[0m"
+        );
     }
 }

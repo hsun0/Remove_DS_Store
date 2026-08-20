@@ -145,6 +145,23 @@ cargo build --release --locked
 
 ## 使用方式
 
+### 彩色輸出
+
+在互動式 terminal 中，`rmds` 會以紅色標示錯誤與重要警告、綠色標示成功結果，並醒目顯示路徑、建議指令及確認文字 `DELETE`。當 stdout 或 stderr 被 pipe／redirect 時，對應輸出會自動維持純文字，不會包含 ANSI color codes。
+
+若不希望顯示顏色，可設定標準的 `NO_COLOR` 環境變數；只要變數存在，不論內容為何都會停用顏色：
+
+```bash
+NO_COLOR=1 rmds folder
+```
+
+PowerShell 可使用：
+
+```powershell
+$env:NO_COLOR = "1"
+rmds folder
+```
+
 ### 預覽資料夾
 
 folder command 會遞迴掃描；預設是安全的 preview，不會修改 filesystem：

@@ -13,6 +13,16 @@ fn run(arguments: &[&str], current_dir: &Path) -> Output {
         .unwrap()
 }
 
+fn run_without_no_color(arguments: &[&str], current_dir: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_rmds"))
+        .args(arguments)
+        .current_dir(current_dir)
+        .env_remove("NO_COLOR")
+        .stdin(Stdio::piped())
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn folder_defaults_to_a_read_only_current_directory_preview() {
     let temp = tempdir().unwrap();
@@ -137,4 +147,37 @@ fn invalid_folder_target_returns_failure_without_deleting() {
     let output = run(&["folder", "missing"], temp.path());
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("No files were removed."));
+}
+
+#[test]
+fn redirected_standard_output_and_errors_do_not_contain_ansi_codes() {
+    let temp = tempdir().unwrap();
+    fs::write(temp.path().join(".DS_Store"), b"finder").unwrap();
+
+    let preview = run_without_no_color(&["folder"], temp.path());
+    assert!(preview.status.success());
+    assert!(!preview.stdout.contains(&0x1b));
+    assert!(!preview.stderr.contains(&0x1b));
+
+    let error = run_without_no_color(&["folder", "missing"], temp.path());
+    assert!(!error.status.success());
+    assert!(!error.stdout.contains(&0x1b));
+    assert!(!error.stderr.contains(&0x1b));
+}
+
+#[test]
+fn no_color_keeps_captured_output_plain() {
+    let temp = tempdir().unwrap();
+    fs::write(temp.path().join(".DS_Store"), b"finder").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rmds"))
+        .arg("folder")
+        .current_dir(temp.path())
+        .env("NO_COLOR", "")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(!output.stdout.contains(&0x1b));
+    assert!(!output.stderr.contains(&0x1b));
 }
