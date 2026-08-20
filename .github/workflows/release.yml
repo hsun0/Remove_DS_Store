@@ -1,0 +1,137 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show pinned toolchain
+        run: rustup show
+      - name: Verify tag matches Cargo package version
+        id: package
+        shell: bash
+        run: |
+          package_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rmds") | .version')"
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            expected_tag="v${package_version}"
+            if [[ "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
+              echo "Tag ${GITHUB_REF_NAME} does not match Cargo package version ${package_version}." >&2
+              exit 1
+            fi
+          fi
+          echo "version=${package_version}" >> "${GITHUB_OUTPUT}"
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Test
+        run: cargo test --locked --target ${{ matrix.target }}
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Verify release binary version on Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          actual="$("target/${{ matrix.target }}/release/rmds" --version)"
+          expected="rmds ${{ needs.verify.outputs.version }}"
+          [[ "${actual}" == "${expected}" ]]
+      - name: Verify release binary version on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $actual = & "target/${{ matrix.target }}/release/rmds.exe" --version
+          $expected = "rmds ${{ needs.verify.outputs.version }}"
+          if ($actual -ne $expected) {
+            throw "Expected '$expected', got '$actual'."
+          }
+      - name: Package Unix binary
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          archive="rmds-v${{ needs.verify.outputs.version }}-${{ matrix.target }}.tar.gz"
+          mkdir -p staging dist
+          cp "target/${{ matrix.target }}/release/rmds" staging/rmds
+          cp README.md LICENSE staging/
+          tar -czf "${PWD}/dist/${archive}" -C staging rmds README.md LICENSE
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = "rmds-v${{ needs.verify.outputs.version }}-${{ matrix.target }}.zip"
+          New-Item -ItemType Directory -Force -Path staging | Out-Null
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item -Path "target/${{ matrix.target }}/release/rmds.exe" -Destination staging/rmds.exe
+          Copy-Item -Path README.md, LICENSE -Destination staging/
+          Compress-Archive -Path staging/* -DestinationPath "dist/$archive"
+      - name: Upload packaged binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: [verify, build]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download packaged binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum rmds-* > SHA256SUMS
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "rmds ${{ needs.verify.outputs.version }}" \
+            --generate-notes \
+            --verify-tag
