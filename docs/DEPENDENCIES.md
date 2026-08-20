@@ -1,6 +1,6 @@
 # 技術與依賴選型
 
-本文件記錄第一階段的選擇；更新 dependency 或 Rust toolchain 時應一併 review。
+本文件記錄 0.1.3 的選擇；更新 dependency 或 Rust toolchain 時應一併 review。
 
 ## Rust toolchain
 
@@ -25,7 +25,7 @@
 | Timestamp／permissions／symlink | 一般 entry 的 raw copy 保留 header metadata、Unix mode 與 executable bit。Symlink 用 crate 的專用 writer 重建 target 與 mode；無法安全表示的非 UTF-8 symlink 會失敗。 |
 | Unicode | 規則判斷使用 raw filename bytes；raw copy 保留原始 filename encoding 與 UTF-8 flag，不做 Unicode normalization。顯示訊息則使用 crate 的 decoded name。 |
 | Extra fields／comments | raw copy 保留 entry extra fields 與 entry comment；另外保留 archive raw comment。 |
-| Corruption | 建檔前逐 entry 解壓至小 buffer 並讀到 EOF，以觸發結構、codec 與 CRC 驗證；重疊 entry 直接拒絕。 |
+| Corruption | 清理與唯讀 check 都逐 entry 解壓至小 buffer 並讀到 EOF，以觸發結構、codec 與 CRC 驗證；重疊 entry 直接拒絕。 |
 | Encryption | 第一階段沒有密碼介面，encrypted entry 會清楚失敗，不會產生可能未驗證的輸出。 |
 | Security history | 選型時未在 RustSec advisory database 找到影響 `zip 8.6.0` 的未修補公告；仍應在有意識的 dependency update 流程中重新稽核。 |
 | Raw preservation limits | 不保證保留 ZIP 前置 self-extracting stub、central-directory 數位簽章或 ZIP64 extensible data sector。重建 symlink 時可能不保留其 entry comment／extra fields／原 compression method。資料與 symlink semantics 優先；不為 bit-perfect archive round-trip 自行實作 ZIP。 |
@@ -34,7 +34,15 @@
 
 ## CLI parsing
 
-目前語法只有 `rmds zip INPUT [-o OUTPUT]`。`std::env::args_os` 足以保留非 UTF-8 host path、提供可預測 validation，且不需加入 `clap` 的 derive 與 transitive dependencies。若未來 subcommand 與 option 顯著增加，再重新評估 `clap`。
+目前語法包含 `rmds zip INPUT [-o OUTPUT]`、`rmds zip --check INPUT`、`rmds folder [PATH]`、`rmds folder --check [PATH]`、`rmds folder --apply PATH`、`rmds repo [PATH]` 與 `rmds repo --check [PATH]`。`std::env::args_os` 足以保留非 UTF-8 host path、提供可預測 validation，且不需加入 `clap` 的 derive 與 transitive dependencies。Folder／repository traversal、symlink 判斷、check exit code 及 interactive-terminal 檢查也都由 standard library 提供，因此 0.1.3 沒有新增 Rust dependency。若未來 subcommand 與 option 顯著增加，再重新評估 `clap`。
+
+三種 `--check` 共用 `0 = clean`、`1 = metadata found`、`2 = cannot complete` 的 CLI contract。Folder 與 repo 直接重用既有完整 scan result；ZIP check 重用 entry name validation 與固定 64 KiB buffer 的 CRC／codec 驗證，只產生記憶體中的候選清單，不建立 writer、輸出或 temporary file。
+
+## Git executable
+
+Repo mode 使用使用者 `PATH` 中的 Git executable，透過 `std::process::Command` 直接傳入 arguments，不經 shell。選擇系統 Git 而非 `git2`／`libgit2`，可沿用 Git 自己對 worktree、common directory、ignore rules 與 index 的語意，也避免 native library、transitive dependency 與跨平台 linking 負擔。
+
+Repo mode 只呼叫 `rev-parse`、`ls-files` 與 `diff` 等 read-only 查詢，並設定 `GIT_OPTIONAL_LOCKS=0`，不執行 `add`、`rm`、`clean`、`reset`、`restore`、`checkout`、`stash`、`commit` 或 config mutation。filesystem traversal 明確排除 `.git`、nested repository 與 submodule boundary；`.gitignore` 只顯示建議，不自動修改。Git 不存在時只有 repo mode 失敗，ZIP 與 folder mode 不受影響。
 
 ## Atomic output
 
