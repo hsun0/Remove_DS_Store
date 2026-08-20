@@ -1,8 +1,8 @@
 # rmds
 
-> **rmds 0.1.2 — 安全預覽及移除 ZIP、資料夾與 Git working tree 中的 macOS metadata。**
+> **rmds 0.1.3 — 安全檢查、預覽及移除 ZIP、資料夾與 Git working tree 中的 macOS metadata。**
 
-`rmds` 精確辨識 `.DS_Store`、AppleDouble `._*` 與 `__MACOSX` metadata。ZIP 模式建立安全的清理副本；folder 模式預設只預覽，只有明確使用 `--apply` 並完成互動確認後才會原地刪除；repo 模式會先顯示 Git 狀態與警告，只有輸入精確的 `DELETE` 才清理 working tree。
+`rmds` 精確辨識 `.DS_Store`、AppleDouble `._*` 與 `__MACOSX` metadata。三種目標都有適合 CI 的唯讀 `--check`；ZIP 模式建立安全的清理副本；folder 模式預設只預覽，只有明確使用 `--apply` 並完成互動確認後才會原地刪除；repo 模式會先顯示 Git 狀態與警告，只有輸入精確的 `DELETE` 才清理 working tree。
 
 `rmds` 是以 Rust 開發的跨平台 CLI。它清的是 macOS 產生的 metadata，但工具本身以 macOS、Windows 與 Linux 都能執行為目標。
 
@@ -162,6 +162,36 @@ $env:NO_COLOR = "1"
 rmds folder
 ```
 
+### 唯讀 Check 模式
+
+Folder、Git repository 與 ZIP 共用相同的 check 語意：完整掃描、列出候選並以 exit code 回報，過程不詢問 `DELETE`，也不刪除、建立或覆寫檔案。
+
+```bash
+# PATH 預設為目前資料夾
+rmds folder --check [PATH]
+rmds repo --check [PATH]
+
+# ZIP 必須明確指定輸入檔
+rmds zip --check archive.zip
+```
+
+Check mode 的 exit code：
+
+- `0`：檢查完成，沒有 macOS metadata。
+- `1`：檢查完成，找到至少一個 metadata；適合讓 CI job 判定內容不符合要求。
+- `2`：參數或目標錯誤，或掃描／驗證無法完整完成。
+
+Folder check 重用安全的 filesystem traversal；repo check 會顯示 Git classification，但不要求 TTY、不修改 `.git`、index 或 `.gitignore`；ZIP check 會串流驗證 entry、CRC、compression 與安全路徑，不 extract、不建立 cleaned ZIP 或暫存檔。pipe、redirect 及 `NO_COLOR` 下的結果保持純文字。
+
+GitHub Actions 可使用：
+
+```yaml
+- name: Check macOS metadata in repository
+  run: rmds repo --check .
+```
+
+這只是 workflow 範例；`rmds` 不會自動建立或修改 repository 的 workflow。
+
 ### 預覽資料夾
 
 folder command 會遞迴掃描；預設是安全的 preview，不會修改 filesystem：
@@ -261,8 +291,11 @@ rmds zip photos.zip -o clean.zip
 ```bash
 rmds --help
 rmds --version
+rmds folder --check .
 rmds folder --help
+rmds repo --check .
 rmds repo --help
+rmds zip --check archive.zip
 rmds zip --help
 ```
 
@@ -270,10 +303,17 @@ rmds zip --help
 
 ```text
 $ rmds --version
-rmds 0.1.2
+rmds 0.1.3
 ```
 
 ## 安全保證
+
+### Check mode
+
+- `folder --check`、`repo --check` 與 `zip --check` 都是唯讀、非互動流程，不會呼叫 deletion function。
+- 三種目標統一以 `0` 表示 clean、`1` 表示找到 metadata、`2` 表示無法完成檢查。
+- Check 必須先完成整次掃描才回報結果；不會把 partial scan 誤報為通過。
+- Check 可安全用於 CI、pipe 與 redirect；非互動輸出不含 ANSI color codes。
 
 ### Folder mode
 
@@ -321,7 +361,7 @@ GitHub Actions 在 `ubuntu-latest`、`macos-latest`、`windows-latest` 執行相
 
 ## 尚未實作
 
-0.1.2 沒有 repo `--apply`、`--yes`、`--force`、`--no-confirm`、`--dry-run`、trash／recycle-bin、rollback、`.gitignore` 修改、Git stage／commit／push／history rewriting、submodule cleaning、nested repository cleaning、GUI、設定檔、telemetry、套件管理器發佈、release automation 或自動更新。
+0.1.3 沒有 repo `--apply`、`--yes`、`--force`、`--no-confirm`、trash／recycle-bin、rollback、`.gitignore` 修改、Git stage／commit／push／history rewriting、submodule cleaning、nested repository cleaning、GUI、設定檔、telemetry、套件管理器發佈、release automation 或自動更新。
 
 ## License
 

@@ -19,6 +19,29 @@ pub struct CleanReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZipScan {
+    input: PathBuf,
+    candidates: Vec<String>,
+}
+
+impl ZipScan {
+    #[must_use]
+    pub fn input(&self) -> &Path {
+        &self.input
+    }
+
+    #[must_use]
+    pub fn candidates(&self) -> &[String] {
+        &self.candidates
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.candidates.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CleanError(String);
 
 impl CleanError {
@@ -49,31 +72,34 @@ pub fn default_output_path(input: &Path) -> PathBuf {
     input.with_file_name(filename)
 }
 
+/// Validates and scans a ZIP without creating an output or temporary file.
+pub fn scan_zip(input: &Path) -> Result<ZipScan> {
+    let mut archive = open_validated_archive(input)?;
+    let mut candidates = Vec::new();
+    let mut buffer = [0_u8; VERIFY_BUFFER_SIZE];
+
+    for index in 0..archive.len() {
+        let inspected = inspect_entry(&mut archive, index, &mut buffer)?;
+        if inspected.is_metadata {
+            candidates.push((inspected.raw_name, inspected.display_name));
+        }
+    }
+
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+
+    Ok(ZipScan {
+        input: input.to_path_buf(),
+        candidates: candidates
+            .into_iter()
+            .map(|(_, display_name)| display_name)
+            .collect(),
+    })
+}
+
 /// Creates a cleaned ZIP without modifying `input` or overwriting `output`.
 pub fn clean_zip(input: &Path, output: &Path) -> Result<CleanReport> {
     validate_input_output(input, output)?;
-
-    let input_file = File::open(input).map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            CleanError::new(format!("file not found:\n{}", input.display()))
-        } else {
-            CleanError::new(format!("cannot read input {}: {error}", input.display()))
-        }
-    })?;
-
-    let mut archive = ZipArchive::new(input_file)
-        .map_err(|error| CleanError::new(format!("invalid ZIP {}: {error}", input.display())))?;
-
-    if archive.has_overlapping_files().map_err(|error| {
-        CleanError::new(format!(
-            "cannot validate ZIP structure {}: {error}",
-            input.display()
-        ))
-    })? {
-        return Err(CleanError::new(
-            "unsafe ZIP structure: archive entries overlap",
-        ));
-    }
+    let mut archive = open_validated_archive(input)?;
 
     let archive_comment = archive.comment().to_vec();
     let parent = output_parent(output);
@@ -131,48 +157,82 @@ fn copy_verified_entries(
     let mut buffer = [0_u8; VERIFY_BUFFER_SIZE];
 
     for index in 0..archive.len() {
-        let (raw_name, display_name, encrypted, symlink) = {
-            let entry = archive.by_index_raw(index).map_err(|error| {
-                CleanError::new(format!("cannot inspect ZIP entry #{index}: {error}"))
-            })?;
-            (
-                entry.name_raw().to_vec(),
-                entry.name().to_owned(),
-                entry.encrypted(),
-                entry.is_symlink(),
-            )
-        };
+        let inspected = inspect_entry(archive, index, &mut buffer)?;
 
-        validate_entry_name(&raw_name).map_err(|reason| {
-            CleanError::new(format!("unsafe ZIP entry {display_name:?}: {reason}"))
-        })?;
-
-        if encrypted {
-            return Err(CleanError::new(format!(
-                "encrypted ZIP entry is not supported: {display_name}"
-            )));
-        }
-
-        verify_entry(archive, index, &display_name, &mut buffer)?;
-
-        if is_macos_metadata(&raw_name) {
-            removed.push(display_name);
+        if inspected.is_metadata {
+            removed.push(inspected.display_name);
             continue;
         }
 
-        if symlink {
-            copy_symlink(archive, writer, index, &raw_name, &display_name)?;
+        if inspected.symlink {
+            copy_symlink(
+                archive,
+                writer,
+                index,
+                &inspected.raw_name,
+                &inspected.display_name,
+            )?;
         } else {
             let entry = archive.by_index_raw(index).map_err(|error| {
-                CleanError::new(format!("cannot reopen ZIP entry {display_name:?}: {error}"))
+                CleanError::new(format!(
+                    "cannot reopen ZIP entry {:?}: {error}",
+                    inspected.display_name
+                ))
             })?;
             writer.raw_copy_file(entry).map_err(|error| {
-                CleanError::new(format!("cannot copy ZIP entry {display_name:?}: {error}"))
+                CleanError::new(format!(
+                    "cannot copy ZIP entry {:?}: {error}",
+                    inspected.display_name
+                ))
             })?;
         }
     }
 
     Ok(removed)
+}
+
+struct InspectedEntry {
+    raw_name: Vec<u8>,
+    display_name: String,
+    is_metadata: bool,
+    symlink: bool,
+}
+
+fn inspect_entry(
+    archive: &mut ZipArchive<File>,
+    index: usize,
+    buffer: &mut [u8],
+) -> Result<InspectedEntry> {
+    let (raw_name, display_name, encrypted, symlink) = {
+        let entry = archive.by_index_raw(index).map_err(|error| {
+            CleanError::new(format!("cannot inspect ZIP entry #{index}: {error}"))
+        })?;
+        (
+            entry.name_raw().to_vec(),
+            entry.name().to_owned(),
+            entry.encrypted(),
+            entry.is_symlink(),
+        )
+    };
+
+    validate_entry_name(&raw_name).map_err(|reason| {
+        CleanError::new(format!("unsafe ZIP entry {display_name:?}: {reason}"))
+    })?;
+
+    if encrypted {
+        return Err(CleanError::new(format!(
+            "encrypted ZIP entry is not supported: {display_name}"
+        )));
+    }
+
+    verify_entry(archive, index, &display_name, buffer)?;
+
+    Ok(InspectedEntry {
+        is_metadata: is_macos_metadata(&raw_name),
+        raw_name,
+        display_name,
+        symlink,
+    })
 }
 
 fn copy_symlink(
@@ -256,20 +316,7 @@ fn validate_input_output(input: &Path, output: &Path) -> Result<()> {
         return Err(CleanError::new("output path must differ from input path"));
     }
 
-    let metadata = fs::metadata(input).map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            CleanError::new(format!("file not found:\n{}", input.display()))
-        } else {
-            CleanError::new(format!("cannot inspect input {}: {error}", input.display()))
-        }
-    })?;
-
-    if !metadata.is_file() {
-        return Err(CleanError::new(format!(
-            "input is not a regular file:\n{}",
-            input.display()
-        )));
-    }
+    validate_input(input)?;
 
     if output.exists() {
         return Err(CleanError::new(format!(
@@ -293,6 +340,48 @@ fn validate_input_output(input: &Path, output: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn validate_input(input: &Path) -> Result<()> {
+    let metadata = fs::metadata(input).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            CleanError::new(format!("file not found:\n{}", input.display()))
+        } else {
+            CleanError::new(format!("cannot inspect input {}: {error}", input.display()))
+        }
+    })?;
+
+    if !metadata.is_file() {
+        return Err(CleanError::new(format!(
+            "input is not a regular file:\n{}",
+            input.display()
+        )));
+    }
+
+    Ok(())
+}
+
+fn open_validated_archive(input: &Path) -> Result<ZipArchive<File>> {
+    validate_input(input)?;
+
+    let input_file = File::open(input).map_err(|error| {
+        CleanError::new(format!("cannot read input {}: {error}", input.display()))
+    })?;
+    let mut archive = ZipArchive::new(input_file)
+        .map_err(|error| CleanError::new(format!("invalid ZIP {}: {error}", input.display())))?;
+
+    if archive.has_overlapping_files().map_err(|error| {
+        CleanError::new(format!(
+            "cannot validate ZIP structure {}: {error}",
+            input.display()
+        ))
+    })? {
+        return Err(CleanError::new(
+            "unsafe ZIP structure: archive entries overlap",
+        ));
+    }
+
+    Ok(archive)
 }
 
 fn output_parent(output: &Path) -> &Path {

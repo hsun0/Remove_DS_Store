@@ -8,23 +8,26 @@ use std::process::ExitCode;
 
 use rmds::folder_cleaner::{FolderCandidate, FolderScan, apply_folder_cleanup, scan_folder};
 use rmds::repo_cleaner::{RepoCandidate, apply_repo_cleanup, scan_repo};
-use rmds::zip_cleaner::{clean_zip, default_output_path};
+use rmds::zip_cleaner::{clean_zip, default_output_path, scan_zip};
 
 const HELP: &str =
     "rmds — Remove unwanted macOS metadata from ZIP archives, folders, and Git repositories.
 
 Usage:
   rmds zip <INPUT.zip> [-o <OUTPUT.zip>]
+  rmds zip --check <INPUT.zip>
   rmds folder [PATH]
+  rmds folder --check [PATH]
   rmds folder --apply <PATH>
   rmds repo [PATH]
+  rmds repo --check [PATH]
   rmds --help
   rmds --version
 
 Commands:
-  zip       Create a cleaned copy of a ZIP archive
-  folder    Preview folder metadata, or explicitly apply in-place deletion
-  repo      Scan a Git working tree and ask before in-place deletion
+  zip       Check a ZIP, or create a cleaned copy
+  folder    Check or preview a folder, or explicitly apply deletion
+  repo      Check a Git working tree, or ask before in-place deletion
 
 Options:
   -h, --help  Print help
@@ -35,11 +38,15 @@ const REPO_HELP: &str = "Safely find and remove macOS metadata from a Git workin
 
 Usage:
   rmds repo [PATH]
+  rmds repo --check [PATH]
 
 PATH defaults to the current directory. A path inside a repository resolves to
 the full working-tree root. Candidates are displayed before deletion, and an
 interactive terminal must enter exactly DELETE to continue. There is no
 --apply mode.
+
+Check mode is read-only and non-interactive. It exits 0 when clean, 1 when
+metadata is found, and 2 when the check cannot be completed.
 
 rmds never traverses or modifies .git, nested repositories, or submodules. It
 does not edit .gitignore, stage changes, commit, push, or rewrite history.
@@ -51,23 +58,32 @@ const ZIP_HELP: &str = "Clean macOS metadata from a ZIP archive without modifyin
 
 Usage:
   rmds zip <INPUT.zip> [-o <OUTPUT.zip>]
+  rmds zip --check <INPUT.zip>
 
 Options:
+  --check                    Validate and check without creating an output
   -o, --output <OUTPUT.zip>  Choose the destination path
   -h, --help                 Print help
 
 The default destination is <INPUT>-clean.zip. Existing files are never overwritten.
+Check mode is read-only and creates no output or temporary file. It exits 0
+when clean, 1 when metadata is found, and 2 when validation cannot complete.
 ";
 
 const FOLDER_HELP: &str = "Recursively find macOS metadata in a folder.
 
 Usage:
   rmds folder [PATH]
+  rmds folder --check [PATH]
   rmds folder --apply <PATH>
 
 Modes:
   rmds folder [PATH]          Preview only; defaults to the current folder
+  rmds folder --check [PATH]  Read-only CI check; defaults to the current folder
   rmds folder --apply <PATH>  Delete in place after an interactive confirmation
+
+Check mode exits 0 when clean, 1 when metadata is found, and 2 when the check
+cannot be completed. It never requires an interactive terminal.
 
 Apply mode requires an explicit path and an interactive terminal. It displays a
 fresh deletion plan and proceeds only when you enter exactly DELETE. Folder
@@ -78,15 +94,28 @@ be undone, and a failure partway through is not rolled back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FolderMode {
     Preview,
+    Check,
     Apply,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepoMode {
+    Clean,
+    Check,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ZipMode {
+    Clean { output: PathBuf },
+    Check,
 }
 
 enum CliAction {
     Help(&'static str),
     Version,
-    Zip { input: PathBuf, output: PathBuf },
+    Zip { mode: ZipMode, input: PathBuf },
     Folder { mode: FolderMode, path: PathBuf },
-    Repo { path: PathBuf },
+    Repo { mode: RepoMode, path: PathBuf },
 }
 
 #[derive(Clone, Copy)]
@@ -156,9 +185,12 @@ fn main() -> ExitCode {
             println!("rmds {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Ok(CliAction::Zip { input, output }) => run_zip(input, output),
+        Ok(CliAction::Zip { mode, input }) => match mode {
+            ZipMode::Clean { output } => run_zip(input, output),
+            ZipMode::Check => run_zip_check(&input),
+        },
         Ok(CliAction::Folder { mode, path }) => run_folder(mode, &path),
-        Ok(CliAction::Repo { path }) => run_repo(&path),
+        Ok(CliAction::Repo { mode, path }) => run_repo(mode, &path),
         Err(message) => {
             eprintln!(
                 "{}: {message}\n\nRun {} for usage.",
@@ -170,16 +202,28 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_repo(path: &Path) -> ExitCode {
+fn run_repo(mode: RepoMode, path: &Path) -> ExitCode {
     let scan = match scan_repo(path) {
         Ok(scan) => scan,
         Err(error) => {
-            eprintln!("{}: {error}\n\nNo files were removed.", error_label());
+            eprintln!("{}: {error}", error_label());
+            if mode == RepoMode::Check {
+                return ExitCode::from(2);
+            }
+            eprintln!("\nNo files were removed.");
             return ExitCode::FAILURE;
         }
     };
 
     println!("Repository:\n  {}\n", stdout_path(scan.root()));
+    if mode == RepoMode::Check {
+        if !scan.is_empty() {
+            print_repo_candidates("Found macOS metadata:", scan.candidates());
+            println!();
+        }
+        return check_result(scan.candidates().len());
+    }
+
     if scan.is_empty() {
         println!(
             "{}\n\nNo files were removed.\n",
@@ -325,6 +369,27 @@ fn print_gitignore_suggestion() {
     );
 }
 
+fn run_zip_check(input: &Path) -> ExitCode {
+    let scan = match scan_zip(input) {
+        Ok(scan) => scan,
+        Err(error) => {
+            eprintln!("{}: {error}", error_label());
+            return ExitCode::from(2);
+        }
+    };
+
+    println!("ZIP archive:\n  {}\n", stdout_path(scan.input()));
+    if !scan.is_empty() {
+        println!("Found macOS metadata:");
+        for entry in scan.candidates() {
+            println!("  {}", stdout_styled(entry, Color::BoldCyan));
+        }
+        println!();
+    }
+
+    check_result(scan.candidates().len())
+}
+
 fn run_zip(input: PathBuf, output: PathBuf) -> ExitCode {
     println!("Cleaning {}...\n", stdout_path(&input));
 
@@ -374,12 +439,24 @@ fn run_folder(mode: FolderMode, path: &Path) -> ExitCode {
     let scan = match scan_folder(path) {
         Ok(scan) => scan,
         Err(error) => {
-            eprintln!("{}: {error}\n\nNo files were removed.", error_label());
+            eprintln!("{}: {error}", error_label());
+            if mode == FolderMode::Check {
+                return ExitCode::from(2);
+            }
+            eprintln!("\nNo files were removed.");
             return ExitCode::FAILURE;
         }
     };
 
     println!("Scanning folder:\n  {}\n", stdout_path(scan.root()));
+    if mode == FolderMode::Check {
+        if !scan.is_empty() {
+            print_candidate_paths("Found macOS metadata:", scan.candidates());
+            println!();
+        }
+        return check_result(scan.candidates().len());
+    }
+
     if scan.is_empty() {
         println!(
             "{}\n\nNo files were removed.",
@@ -391,6 +468,7 @@ fn run_folder(mode: FolderMode, path: &Path) -> ExitCode {
     match mode {
         FolderMode::Preview => run_folder_preview(&scan, path),
         FolderMode::Apply => run_folder_apply(&scan),
+        FolderMode::Check => unreachable!("check mode returns before deletion dispatch"),
     }
 }
 
@@ -520,6 +598,28 @@ fn entry_word(count: usize) -> &'static str {
     if count == 1 { "entry" } else { "entries" }
 }
 
+fn check_result(candidate_count: usize) -> ExitCode {
+    if candidate_count == 0 {
+        println!(
+            "{}",
+            stdout_styled("Check passed: no macOS metadata found.", Color::Green)
+        );
+        ExitCode::SUCCESS
+    } else {
+        println!(
+            "{}",
+            stdout_styled(
+                &format!(
+                    "Check failed: found {candidate_count} metadata {}.",
+                    entry_word(candidate_count)
+                ),
+                Color::Red
+            )
+        );
+        ExitCode::FAILURE
+    }
+}
+
 fn is_delete_confirmation(input: &str) -> bool {
     let without_newline = input
         .strip_suffix("\r\n")
@@ -561,6 +661,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, Str
 fn parse_repo_args(mut args: impl Iterator<Item = OsString>) -> Result<CliAction, String> {
     let Some(first) = args.next() else {
         return Ok(CliAction::Repo {
+            mode: RepoMode::Clean,
             path: PathBuf::from("."),
         });
     };
@@ -572,6 +673,13 @@ fn parse_repo_args(mut args: impl Iterator<Item = OsString>) -> Result<CliAction
             );
         }
         return Ok(CliAction::Help(REPO_HELP));
+    }
+    if is(&first, "--check") {
+        let path = optional_check_path(&mut args, "repo")?;
+        return Ok(CliAction::Repo {
+            mode: RepoMode::Check,
+            path,
+        });
     }
     if first.as_encoded_bytes().starts_with(b"-") {
         return Err(format!(
@@ -587,6 +695,7 @@ fn parse_repo_args(mut args: impl Iterator<Item = OsString>) -> Result<CliAction
     }
 
     Ok(CliAction::Repo {
+        mode: RepoMode::Clean,
         path: PathBuf::from(first),
     })
 }
@@ -600,6 +709,27 @@ fn parse_zip_args(mut args: impl Iterator<Item = OsString>) -> Result<CliAction,
             return Err("unexpected argument after zip --help".to_owned());
         }
         return Ok(CliAction::Help(ZIP_HELP));
+    }
+    if is(&input, "--check") {
+        let Some(input) = args.next() else {
+            return Err("check mode requires a ZIP input: rmds zip --check <INPUT.zip>".to_owned());
+        };
+        if input.as_encoded_bytes().starts_with(b"-") {
+            return Err(
+                "expected a ZIP input after --check\n\nUsage:\n  rmds zip --check <INPUT.zip>"
+                    .to_owned(),
+            );
+        }
+        if let Some(extra) = args.next() {
+            return Err(format!(
+                "unexpected argument after check input: {}\n\nUsage:\n  rmds zip --check <INPUT.zip>",
+                extra.to_string_lossy()
+            ));
+        }
+        return Ok(CliAction::Zip {
+            mode: ZipMode::Check,
+            input: PathBuf::from(input),
+        });
     }
     if is(&input, "-o") || is(&input, "--output") {
         return Err("missing ZIP input path before --output".to_owned());
@@ -625,7 +755,10 @@ fn parse_zip_args(mut args: impl Iterator<Item = OsString>) -> Result<CliAction,
     }
 
     let output = output.unwrap_or_else(|| default_output_path(&input));
-    Ok(CliAction::Zip { input, output })
+    Ok(CliAction::Zip {
+        mode: ZipMode::Clean { output },
+        input,
+    })
 }
 
 fn parse_folder_args(mut args: impl Iterator<Item = OsString>) -> Result<CliAction, String> {
@@ -664,6 +797,14 @@ fn parse_folder_args(mut args: impl Iterator<Item = OsString>) -> Result<CliActi
         });
     }
 
+    if is(&first, "--check") {
+        let path = optional_check_path(&mut args, "folder")?;
+        return Ok(CliAction::Folder {
+            mode: FolderMode::Check,
+            path,
+        });
+    }
+
     if first.as_encoded_bytes().starts_with(b"-") {
         return Err(format!(
             "unknown folder option: {}",
@@ -680,6 +821,27 @@ fn parse_folder_args(mut args: impl Iterator<Item = OsString>) -> Result<CliActi
     })
 }
 
+fn optional_check_path(
+    args: &mut impl Iterator<Item = OsString>,
+    command: &str,
+) -> Result<PathBuf, String> {
+    let Some(path) = args.next() else {
+        return Ok(PathBuf::from("."));
+    };
+    if path.as_encoded_bytes().starts_with(b"-") {
+        return Err(format!(
+            "expected a path after --check\n\nUsage:\n  rmds {command} --check [PATH]"
+        ));
+    }
+    if let Some(extra) = args.next() {
+        return Err(format!(
+            "unexpected argument after check path: {}\n\nUsage:\n  rmds {command} --check [PATH]",
+            extra.to_string_lossy()
+        ));
+    }
+    Ok(PathBuf::from(path))
+}
+
 fn is(value: &OsStr, expected: &str) -> bool {
     value == OsStr::new(expected)
 }
@@ -687,7 +849,8 @@ fn is(value: &OsStr, expected: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CliAction, Color, FolderMode, colors_enabled, is_delete_confirmation, parse_args, styled,
+        CliAction, Color, FolderMode, RepoMode, ZipMode, colors_enabled, is_delete_confirmation,
+        parse_args, styled,
     };
     use std::ffi::OsString;
     use std::path::Path;
@@ -698,18 +861,36 @@ mod tests {
 
     #[test]
     fn parses_zip_default_and_custom_outputs() {
-        let CliAction::Zip { input, output } = parse_args(args(&["zip", "a.zip"])).unwrap() else {
+        let CliAction::Zip { input, mode } = parse_args(args(&["zip", "a.zip"])).unwrap() else {
             panic!("expected zip action");
         };
         assert_eq!(input, Path::new("a.zip"));
-        assert_eq!(output, Path::new("a-clean.zip"));
+        assert_eq!(
+            mode,
+            ZipMode::Clean {
+                output: Path::new("a-clean.zip").to_path_buf()
+            }
+        );
 
-        let CliAction::Zip { output, .. } =
+        let CliAction::Zip { mode, .. } =
             parse_args(args(&["zip", "a.zip", "--output", "b.zip"])).unwrap()
         else {
             panic!("expected zip action");
         };
-        assert_eq!(output, Path::new("b.zip"));
+        assert_eq!(
+            mode,
+            ZipMode::Clean {
+                output: Path::new("b.zip").to_path_buf()
+            }
+        );
+
+        let CliAction::Zip { mode, input } =
+            parse_args(args(&["zip", "--check", "a.zip"])).unwrap()
+        else {
+            panic!("expected ZIP check action");
+        };
+        assert_eq!(mode, ZipMode::Check);
+        assert_eq!(input, Path::new("a.zip"));
     }
 
     #[test]
@@ -744,6 +925,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_folder_check_default_and_path_in_canonical_order() {
+        let CliAction::Folder { mode, path } = parse_args(args(&["folder", "--check"])).unwrap()
+        else {
+            panic!("expected folder action");
+        };
+        assert_eq!(mode, FolderMode::Check);
+        assert_eq!(path, Path::new("."));
+
+        let CliAction::Folder { mode, path } =
+            parse_args(args(&["folder", "--check", "photos"])).unwrap()
+        else {
+            panic!("expected folder action");
+        };
+        assert_eq!(mode, FolderMode::Check);
+        assert_eq!(path, Path::new("photos"));
+
+        assert!(parse_args(args(&["folder", "photos", "--check"])).is_err());
+        assert!(parse_args(args(&["folder", "--check", "--apply", "."])).is_err());
+        assert!(parse_args(args(&["folder", "--check", "one", "two"])).is_err());
+    }
+
+    #[test]
     fn parses_version_without_extra_arguments() {
         assert!(matches!(
             parse_args(args(&["--version"])),
@@ -754,20 +957,39 @@ mod tests {
 
     #[test]
     fn parses_repo_default_and_path_without_apply_mode() {
-        let CliAction::Repo { path } = parse_args(args(&["repo"])).unwrap() else {
+        let CliAction::Repo { mode, path } = parse_args(args(&["repo"])).unwrap() else {
             panic!("expected repo action");
         };
+        assert_eq!(mode, RepoMode::Clean);
         assert_eq!(path, Path::new("."));
 
-        let CliAction::Repo { path } = parse_args(args(&["repo", "project"])).unwrap() else {
+        let CliAction::Repo { mode, path } = parse_args(args(&["repo", "project"])).unwrap() else {
             panic!("expected repo action");
         };
+        assert_eq!(mode, RepoMode::Clean);
+        assert_eq!(path, Path::new("project"));
+
+        let CliAction::Repo { mode, path } = parse_args(args(&["repo", "--check"])).unwrap() else {
+            panic!("expected repo check action");
+        };
+        assert_eq!(mode, RepoMode::Check);
+        assert_eq!(path, Path::new("."));
+
+        let CliAction::Repo { mode, path } =
+            parse_args(args(&["repo", "--check", "project"])).unwrap()
+        else {
+            panic!("expected repo check action");
+        };
+        assert_eq!(mode, RepoMode::Check);
         assert_eq!(path, Path::new("project"));
 
         assert!(parse_args(args(&["repo", "--apply"])).is_err());
         assert!(parse_args(args(&["repo", "--apply", "project"])).is_err());
         assert!(parse_args(args(&["repo", "project", "--apply"])).is_err());
         assert!(parse_args(args(&["repo", "one", "two"])).is_err());
+        assert!(parse_args(args(&["repo", "project", "--check"])).is_err());
+        assert!(parse_args(args(&["repo", "--check", "--apply", "."])).is_err());
+        assert!(parse_args(args(&["repo", "--check", "one", "two"])).is_err());
     }
 
     #[test]
@@ -791,6 +1013,9 @@ mod tests {
         assert!(parse_args(args(&["zip"])).is_err());
         assert!(parse_args(args(&["zip", "a.zip", "--output"])).is_err());
         assert!(parse_args(args(&["zip", "a.zip", "extra"])).is_err());
+        assert!(parse_args(args(&["zip", "--check"])).is_err());
+        assert!(parse_args(args(&["zip", "a.zip", "--check"])).is_err());
+        assert!(parse_args(args(&["zip", "--check", "a.zip", "-o", "b.zip"])).is_err());
         assert!(parse_args(args(&["folder", "--force", "photos"])).is_err());
     }
 

@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rmds::zip_cleaner::clean_zip;
+use rmds::zip_cleaner::{clean_zip, scan_zip};
 use tempfile::tempdir;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
@@ -93,6 +93,122 @@ fn write_single(path: &Path, name: &str, content: &[u8], method: CompressionMeth
     writer.start_file(name, options(method, 0o644)).unwrap();
     writer.write_all(content).unwrap();
     writer.finish().unwrap();
+}
+
+fn patch_compression_method(path: &Path, method: u16) {
+    let mut bytes = fs::read(path).unwrap();
+    for offset in 0..bytes.len().saturating_sub(12) {
+        if bytes[offset..].starts_with(b"PK\x03\x04") {
+            bytes[offset + 8..offset + 10].copy_from_slice(&method.to_le_bytes());
+        } else if bytes[offset..].starts_with(b"PK\x01\x02") {
+            bytes[offset + 10..offset + 12].copy_from_slice(&method.to_le_bytes());
+        }
+    }
+    fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn scans_zip_read_only_and_returns_stably_sorted_metadata() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("input.zip");
+    fixture(&input);
+    let original = fs::read(&input).unwrap();
+    let before_entries: Vec<_> = fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+
+    let scan = scan_zip(&input).unwrap();
+
+    assert_eq!(scan.input(), input);
+    assert_eq!(
+        scan.candidates(),
+        [
+            ".DS_Store",
+            "._root",
+            "__MACOSX/",
+            "__MACOSX/project/._README.md",
+            "nested/__MACOSX/._item",
+            "project/.DS_Store",
+            "project/._README.md",
+        ]
+    );
+    assert_eq!(fs::read(&input).unwrap(), original);
+    let after_entries: Vec<_> = fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(after_entries, before_entries);
+}
+
+#[test]
+fn scans_clean_zip_and_preserves_similar_names() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("plain.zip");
+    let mut writer = ZipWriter::new(File::create(&input).unwrap());
+    for name in [".DS_Store.backup", "foo._bar", "__MACOSX-file", "照片.txt"] {
+        writer
+            .start_file(name, options(CompressionMethod::Deflated, 0o644))
+            .unwrap();
+        writer.write_all(b"keep").unwrap();
+    }
+    writer.finish().unwrap();
+
+    assert!(scan_zip(&input).unwrap().is_empty());
+}
+
+#[test]
+fn zip_scan_rejects_missing_corrupt_crc_and_unsafe_inputs() {
+    let directory = tempdir().unwrap();
+    assert!(scan_zip(&directory.path().join("missing.zip")).is_err());
+
+    let malformed = directory.path().join("malformed.zip");
+    fs::write(&malformed, b"not a zip").unwrap();
+    assert!(scan_zip(&malformed).is_err());
+
+    let crc = directory.path().join("crc.zip");
+    let payload = b"unique-check-payload-for-crc";
+    write_single(&crc, "file.txt", payload, CompressionMethod::Stored);
+    let mut bytes = fs::read(&crc).unwrap();
+    let offset = bytes
+        .windows(payload.len())
+        .position(|window| window == payload)
+        .unwrap();
+    bytes[offset] ^= 0xff;
+    fs::write(&crc, bytes).unwrap();
+    assert!(scan_zip(&crc).is_err());
+
+    let suspicious = directory.path().join("suspicious.zip");
+    write_single(
+        &suspicious,
+        "../.DS_Store",
+        b"unsafe",
+        CompressionMethod::Stored,
+    );
+    assert!(scan_zip(&suspicious).is_err());
+}
+
+#[test]
+fn zip_scan_rejects_unsupported_compression_without_output() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("unsupported.zip");
+    write_single(&input, ".DS_Store", b"metadata", CompressionMethod::Stored);
+    patch_compression_method(&input, 99);
+    let original = fs::read(&input).unwrap();
+
+    assert!(scan_zip(&input).is_err());
+    assert_eq!(fs::read(&input).unwrap(), original);
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn zip_scan_streams_large_entries_with_bounded_memory() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("large.zip");
+    let content = vec![0x5a; 4 * 1024 * 1024];
+    write_single(&input, "large.bin", &content, CompressionMethod::Deflated);
+
+    assert!(scan_zip(&input).unwrap().is_empty());
 }
 
 #[test]
