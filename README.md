@@ -1,12 +1,12 @@
 # rmds
 
-> **rmds 0.1.1 — 安全預覽及移除 ZIP 與資料夾中的 macOS metadata。**
+> **rmds 0.1.2 — 安全預覽及移除 ZIP、資料夾與 Git working tree 中的 macOS metadata。**
 
-`rmds` 精確辨識 `.DS_Store`、AppleDouble `._*` 與 `__MACOSX` metadata。ZIP 模式建立安全的清理副本；folder 模式預設只預覽，只有明確使用 `--apply` 並完成互動確認後才會原地刪除。
+`rmds` 精確辨識 `.DS_Store`、AppleDouble `._*` 與 `__MACOSX` metadata。ZIP 模式建立安全的清理副本；folder 模式預設只預覽，只有明確使用 `--apply` 並完成互動確認後才會原地刪除；repo 模式會先顯示 Git 狀態與警告，只有輸入精確的 `DELETE` 才清理 working tree。
 
 `rmds` 是以 Rust 開發的跨平台 CLI。它清的是 macOS 產生的 metadata，但工具本身以 macOS、Windows 與 Linux 都能執行為目標。
 
-## 為什麼 ZIP 裡會有這些檔案？
+## 為什麼會有這些檔案？
 
 macOS 在建立或封裝檔案時可能加入：
 
@@ -189,6 +189,42 @@ echo DELETE | rmds folder --apply ./project
 - metadata symbolic link 只移除 link，不會觸碰 target；其他 directory symlink 不會被進入或修改，broken symlink 也不會被 follow。
 - Preview 與 Apply 都拒絕 symbolic-link root 與 filesystem root（例如 `/` 或 `C:\`）。
 
+### 清理 Git repository
+
+repo mode 需要系統已安裝 Git，且 `git` 可以從 `PATH` 執行：
+
+```bash
+# 掃描目前 repository，顯示候選後詢問確認
+rmds repo
+
+# 指定 repository 或其內部子資料夾
+rmds repo ./project
+```
+
+指定 repository 內的子資料夾時，`rmds` 會透過 read-only Git commands 解析並掃描完整 working-tree root。repo mode 沒有 `--apply`；command 會先完整顯示候選、Git classification 與風險警告，只有在 interactive terminal 輸入精確的 `DELETE` 才開始刪除。直接按 Enter、輸入其他文字或使用 pipe 都不會確認。
+
+候選項目可能顯示：
+
+- `[tracked]`：存在於 Git index，working tree 沒有額外修改。
+- `[tracked, modified]`：tracked，但有尚未提交的修改。
+- `[untracked]`：未被 Git 追蹤。
+- `[ignored]`：符合 Git ignore 規則。
+- `[mixed]`：`__MACOSX` tree 內含多種 Git 狀態。
+
+Git 只能協助 review working-tree deletion，不能保證復原 untracked、ignored 或 uncommitted content。成功後請檢查：
+
+```bash
+git status --short
+```
+
+repo mode 有以下硬性界線：
+
+- filesystem traversal 永遠跳過 `.git`；不刪除或寫入 Git directory、common directory、index、commit、branch、tag、config 或 history。
+- 不執行 `git add`、`git rm`、`git clean`、commit 或 push；tracked deletion 不會自動 stage。
+- 不進入 nested repository 或 submodule。任何子資料夾出現 `.git` directory、file 或 symlink，就保守跳過整棵 tree。
+- 不修改 `.gitignore`、`.git/info/exclude` 或 global ignore，只顯示建議：`.DS_Store`、`._*`、`__MACOSX/`。
+- repo deletion 是 in-place 且沒有 automatic rollback；partial failure 會停止並列出已刪除項目。
+
 ### 清理 ZIP
 
 ```bash
@@ -209,6 +245,7 @@ rmds zip photos.zip -o clean.zip
 rmds --help
 rmds --version
 rmds folder --help
+rmds repo --help
 rmds zip --help
 ```
 
@@ -216,7 +253,7 @@ rmds zip --help
 
 ```text
 $ rmds --version
-rmds 0.1.1
+rmds 0.1.2
 ```
 
 ## 安全保證
@@ -228,6 +265,14 @@ rmds 0.1.1
 - 掃描使用 host filesystem path semantics 與 iterative traversal，不依賴 UTF-8，也不 follow symbolic links。
 - 刪除前會重新驗證 root、候選名稱、型別與父資料夾，檢查項目仍位於 validated root 內；發現變動就停止。
 - folder deletion 並非 atomic。部分失敗時不宣稱或嘗試 rollback，會誠實回報已刪除項目。
+
+### Repo mode
+
+- 單一流程是 scan → display → warn → exact `DELETE` → revalidate → delete；confirmation 前不做任何 filesystem mutation。
+- 所有 Git 查詢都透過 argument-safe、machine-readable command 執行，並設定 `GIT_OPTIONAL_LOCKS=0`；Git 不存在只會讓 repo mode 失敗。
+- `.git` 是獨立 hard boundary；刪除前會再次檢查 candidate、parents、Git directory、common directory 與 nested repository boundary。
+- `.gitignore` 永遠只提供文字建議，不會自動修改。
+- Git 並非完整備份；untracked、ignored、uncommitted content 可能無法復原。
 
 ### ZIP mode
 
@@ -255,11 +300,11 @@ cargo clippy --all-targets --locked -- -D warnings
 
 ## 跨平台目標
 
-GitHub Actions 在 `ubuntu-latest`、`macos-latest`、`windows-latest` 執行相同 locked build、test、format 與 Clippy。程式不呼叫 Finder、Apple-only API、shell、`/usr/bin/zip` 或 `/usr/bin/ditto`。
+GitHub Actions 在 `ubuntu-latest`、`macos-latest`、`windows-latest` 執行相同 locked build、test、format 與 Clippy。程式不呼叫 Finder、Apple-only API、shell、`/usr/bin/zip` 或 `/usr/bin/ditto`。只有 repo mode 會透過 `std::process::Command` 呼叫使用者 `PATH` 中的 Git executable；zip 與 folder mode 不依賴 Git。
 
 ## 尚未實作
 
-0.1.1 沒有 `--yes`、`--force`、`--no-confirm`、`--dry-run`、trash／recycle-bin、rollback、Git cleaning、`.gitignore` 修改、GUI、設定檔、telemetry、套件管理器發佈、release automation 或自動更新。Preview 已是 folder command 的預設行為，因此不提供 `--dry-run` alias。
+0.1.2 沒有 repo `--apply`、`--yes`、`--force`、`--no-confirm`、`--dry-run`、trash／recycle-bin、rollback、`.gitignore` 修改、Git stage／commit／push／history rewriting、submodule cleaning、nested repository cleaning、GUI、設定檔、telemetry、套件管理器發佈、release automation 或自動更新。
 
 ## License
 

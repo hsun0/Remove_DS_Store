@@ -1,6 +1,6 @@
 # 技術與依賴選型
 
-本文件記錄 0.1.1 的選擇；更新 dependency 或 Rust toolchain 時應一併 review。
+本文件記錄 0.1.2 的選擇；更新 dependency 或 Rust toolchain 時應一併 review。
 
 ## Rust toolchain
 
@@ -34,7 +34,13 @@
 
 ## CLI parsing
 
-目前語法包含 `rmds zip INPUT [-o OUTPUT]`、`rmds folder [PATH]` 與 `rmds folder --apply PATH`。`std::env::args_os` 足以保留非 UTF-8 host path、提供可預測 validation，且不需加入 `clap` 的 derive 與 transitive dependencies。Folder traversal、symlink 判斷及 interactive-terminal 檢查也都由 standard library 提供，因此 0.1.1 沒有新增 dependency。若未來 subcommand 與 option 顯著增加，再重新評估 `clap`。
+目前語法包含 `rmds zip INPUT [-o OUTPUT]`、`rmds folder [PATH]`、`rmds folder --apply PATH` 與 `rmds repo [PATH]`。`std::env::args_os` 足以保留非 UTF-8 host path、提供可預測 validation，且不需加入 `clap` 的 derive 與 transitive dependencies。Folder／repository traversal、symlink 判斷及 interactive-terminal 檢查也都由 standard library 提供，因此 0.1.2 沒有新增 Rust dependency。若未來 subcommand 與 option 顯著增加，再重新評估 `clap`。
+
+## Git executable
+
+Repo mode 使用使用者 `PATH` 中的 Git executable，透過 `std::process::Command` 直接傳入 arguments，不經 shell。選擇系統 Git 而非 `git2`／`libgit2`，可沿用 Git 自己對 worktree、common directory、ignore rules 與 index 的語意，也避免 native library、transitive dependency 與跨平台 linking 負擔。
+
+Repo mode 只呼叫 `rev-parse`、`ls-files` 與 `diff` 等 read-only 查詢，並設定 `GIT_OPTIONAL_LOCKS=0`，不執行 `add`、`rm`、`clean`、`reset`、`restore`、`checkout`、`stash`、`commit` 或 config mutation。filesystem traversal 明確排除 `.git`、nested repository 與 submodule boundary；`.gitignore` 只顯示建議，不自動修改。Git 不存在時只有 repo mode 失敗，ZIP 與 folder mode 不受影響。
 
 ## Atomic output
 

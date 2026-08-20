@@ -1,9 +1,9 @@
 [package]
 name = "rmds"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.97"
-description = "Safely remove unwanted macOS metadata from ZIP archives and folders"
+description = "Safely remove unwanted macOS metadata from ZIP archives, folders, and Git repositories"
 license = "MIT"
 keywords = ["cli", "zip", "macos", "metadata"]
 categories = ["command-line-utilities", "filesystem"]

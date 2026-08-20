@@ -99,13 +99,14 @@ fn folder_help_documents_both_modes() {
 }
 
 #[test]
-fn main_help_lists_zip_and_folder() {
+fn main_help_lists_zip_folder_and_repo() {
     let temp = tempdir().unwrap();
     let output = run(&["--help"], temp.path());
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("zip"));
     assert!(stdout.contains("folder"));
+    assert!(stdout.contains("repo"));
     assert!(stdout.contains("--version"));
 }
 

@@ -7,24 +7,44 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use rmds::folder_cleaner::{FolderCandidate, FolderScan, apply_folder_cleanup, scan_folder};
+use rmds::repo_cleaner::{RepoCandidate, apply_repo_cleanup, scan_repo};
 use rmds::zip_cleaner::{clean_zip, default_output_path};
 
-const HELP: &str = "rmds — Remove unwanted macOS metadata from ZIP archives and folders.
+const HELP: &str =
+    "rmds — Remove unwanted macOS metadata from ZIP archives, folders, and Git repositories.
 
 Usage:
   rmds zip <INPUT.zip> [-o <OUTPUT.zip>]
   rmds folder [PATH]
   rmds folder --apply <PATH>
+  rmds repo [PATH]
   rmds --help
   rmds --version
 
 Commands:
   zip       Create a cleaned copy of a ZIP archive
   folder    Preview folder metadata, or explicitly apply in-place deletion
+  repo      Scan a Git working tree and ask before in-place deletion
 
 Options:
   -h, --help  Print help
   --version   Print version
+";
+
+const REPO_HELP: &str = "Safely find and remove macOS metadata from a Git working tree.
+
+Usage:
+  rmds repo [PATH]
+
+PATH defaults to the current directory. A path inside a repository resolves to
+the full working-tree root. Candidates are displayed before deletion, and an
+interactive terminal must enter exactly DELETE to continue. There is no
+--apply mode.
+
+rmds never traverses or modifies .git, nested repositories, or submodules. It
+does not edit .gitignore, stage changes, commit, push, or rewrite history.
+Untracked, ignored, and uncommitted content might not be recoverable, and
+filesystem deletion cannot provide automatic rollback.
 ";
 
 const ZIP_HELP: &str = "Clean macOS metadata from a ZIP archive without modifying the original.
@@ -66,6 +86,7 @@ enum CliAction {
     Version,
     Zip { input: PathBuf, output: PathBuf },
     Folder { mode: FolderMode, path: PathBuf },
+    Repo { path: PathBuf },
 }
 
 fn main() -> ExitCode {
@@ -80,11 +101,136 @@ fn main() -> ExitCode {
         }
         Ok(CliAction::Zip { input, output }) => run_zip(input, output),
         Ok(CliAction::Folder { mode, path }) => run_folder(mode, &path),
+        Ok(CliAction::Repo { path }) => run_repo(&path),
         Err(message) => {
             eprintln!("Error: {message}\n\nRun 'rmds --help' for usage.");
             ExitCode::from(2)
         }
     }
+}
+
+fn run_repo(path: &Path) -> ExitCode {
+    let scan = match scan_repo(path) {
+        Ok(scan) => scan,
+        Err(error) => {
+            eprintln!("Error: {error}\n\nNo files were removed.");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!("Repository:\n  {}\n", scan.root().display());
+    if scan.is_empty() {
+        println!("No macOS metadata found.\n\nNo files were removed.\n");
+        print_gitignore_suggestion();
+        return ExitCode::SUCCESS;
+    }
+
+    print_repo_candidates("Found macOS metadata:", scan.candidates());
+    println!(
+        "\n{} metadata {} may be removed.",
+        scan.candidates().len(),
+        entry_word(scan.candidates().len())
+    );
+    println!("\nWARNING: This is an in-place operation.");
+    println!("Tracked deletions will appear in the Git working tree.");
+    println!("Untracked and ignored files may not be recoverable through Git.");
+    println!("Uncommitted file contents may not be recoverable.");
+    println!("rmds will not modify the Git index, commits, history, or .git.");
+    println!("This operation cannot provide automatic rollback.\n");
+
+    let stdin = io::stdin();
+    if !stdin.is_terminal() {
+        eprintln!(
+            "Error: repository deletion requires an interactive terminal.\n\nNo files were removed."
+        );
+        return ExitCode::FAILURE;
+    }
+
+    print!("Type DELETE exactly to continue: ");
+    if let Err(error) = io::stdout().flush() {
+        eprintln!("\nError: cannot display confirmation prompt: {error}\n\nNo files were removed.");
+        return ExitCode::FAILURE;
+    }
+
+    let mut confirmation = String::new();
+    if let Err(error) = stdin.read_line(&mut confirmation) {
+        eprintln!("\nError: cannot read confirmation: {error}\n\nNo files were removed.");
+        return ExitCode::FAILURE;
+    }
+    if !is_delete_confirmation(&confirmation) {
+        println!("\nCleanup cancelled.\n\nNo files were removed.\n");
+        print_gitignore_suggestion();
+        return ExitCode::SUCCESS;
+    }
+
+    match apply_repo_cleanup(&scan) {
+        Ok(report) => {
+            println!("\nRemoved:");
+            print_repo_candidate_path_lines(scan.candidates());
+            println!(
+                "\nRemoved {} metadata {}.",
+                report.removed.len(),
+                entry_word(report.removed.len())
+            );
+            println!("\nGit metadata, index, and history were not modified.");
+            println!(
+                "Review the working tree with:\n  git -C {} status --short\n",
+                scan.root().display()
+            );
+            print_gitignore_suggestion();
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("\nError: {error}");
+            if error.removed().is_empty() {
+                eprintln!("\nNo files were removed.");
+            } else {
+                eprintln!("\nAlready removed before the failure:");
+                for path in error.removed() {
+                    eprintln!("  {}", path.display());
+                }
+                eprintln!(
+                    "\nAlready removed {} metadata {} before the failure.",
+                    error.removed().len(),
+                    entry_word(error.removed().len())
+                );
+                eprintln!("The operation could not be rolled back.");
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn print_repo_candidates(heading: &str, candidates: &[RepoCandidate]) {
+    println!("{heading}");
+    for candidate in candidates {
+        let suffix = if candidate.display_as_directory() {
+            "/"
+        } else {
+            ""
+        };
+        println!(
+            "  [{:<17}] {}{suffix}",
+            candidate.git_status().label(),
+            candidate.relative_path().display()
+        );
+    }
+}
+
+fn print_repo_candidate_path_lines(candidates: &[RepoCandidate]) {
+    for candidate in candidates {
+        if candidate.display_as_directory() {
+            println!("  {}/", candidate.relative_path().display());
+        } else {
+            println!("  {}", candidate.relative_path().display());
+        }
+    }
+}
+
+fn print_gitignore_suggestion() {
+    println!(
+        "Suggested .gitignore entries:\n  .DS_Store\n  ._*\n  __MACOSX/\n\nrmds did not modify .gitignore."
+    );
 }
 
 fn run_zip(input: PathBuf, output: PathBuf) -> ExitCode {
@@ -272,9 +418,44 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<CliAction, Str
         parse_zip_args(args)
     } else if is(&command, "folder") {
         parse_folder_args(args)
+    } else if is(&command, "repo") {
+        parse_repo_args(args)
     } else {
         Err(format!("unknown command: {}", command.to_string_lossy()))
     }
+}
+
+fn parse_repo_args(mut args: impl Iterator<Item = OsString>) -> Result<CliAction, String> {
+    let Some(first) = args.next() else {
+        return Ok(CliAction::Repo {
+            path: PathBuf::from("."),
+        });
+    };
+
+    if is(&first, "-h") || is(&first, "--help") {
+        if args.next().is_some() {
+            return Err(
+                "unexpected argument after repo --help\n\nUsage:\n  rmds repo [PATH]".to_owned(),
+            );
+        }
+        return Ok(CliAction::Help(REPO_HELP));
+    }
+    if first.as_encoded_bytes().starts_with(b"-") {
+        return Err(format!(
+            "unknown repo option: {}\n\nUsage:\n  rmds repo [PATH]",
+            first.to_string_lossy()
+        ));
+    }
+    if let Some(extra) = args.next() {
+        return Err(format!(
+            "unexpected argument: {}\n\nUsage:\n  rmds repo [PATH]",
+            extra.to_string_lossy()
+        ));
+    }
+
+    Ok(CliAction::Repo {
+        path: PathBuf::from(first),
+    })
 }
 
 fn parse_zip_args(mut args: impl Iterator<Item = OsString>) -> Result<CliAction, String> {
@@ -437,6 +618,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_repo_default_and_path_without_apply_mode() {
+        let CliAction::Repo { path } = parse_args(args(&["repo"])).unwrap() else {
+            panic!("expected repo action");
+        };
+        assert_eq!(path, Path::new("."));
+
+        let CliAction::Repo { path } = parse_args(args(&["repo", "project"])).unwrap() else {
+            panic!("expected repo action");
+        };
+        assert_eq!(path, Path::new("project"));
+
+        assert!(parse_args(args(&["repo", "--apply"])).is_err());
+        assert!(parse_args(args(&["repo", "--apply", "project"])).is_err());
+        assert!(parse_args(args(&["repo", "project", "--apply"])).is_err());
+        assert!(parse_args(args(&["repo", "one", "two"])).is_err());
+    }
+
+    #[test]
     fn confirmation_is_exact_except_for_line_ending() {
         assert!(is_delete_confirmation("DELETE"));
         assert!(is_delete_confirmation("DELETE\n"));
@@ -454,7 +653,6 @@ mod tests {
 
     #[test]
     fn rejects_invalid_arguments() {
-        assert!(parse_args(args(&["repo"])).is_err());
         assert!(parse_args(args(&["zip"])).is_err());
         assert!(parse_args(args(&["zip", "a.zip", "--output"])).is_err());
         assert!(parse_args(args(&["zip", "a.zip", "extra"])).is_err());
