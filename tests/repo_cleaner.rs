@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(unix)]
 use rmds::folder_cleaner::CandidateType;
 use rmds::repo_cleaner::{RepoGitStatus, apply_repo_cleanup, scan_repo};
 use tempfile::tempdir;
